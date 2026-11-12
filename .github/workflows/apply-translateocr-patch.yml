@@ -1,35 +1,38 @@
 
-name: Apply TranslateOCR patch
+name: Apply TranslateOCR patch and build APK
 
 on:
   push:
     branches:
       - master
     paths:
-      - translateocr-github-patch.zip
+      - translateocr-github-patch-keep-default-api.zip
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   apply-patch:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout master
+      - name: Check out master
         uses: actions/checkout@v4
         with:
           ref: master
+          fetch-depth: 0
 
-      - name: Extract patch
+      - name: Apply source patch
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path, PurePosixPath
           from zipfile import ZipFile
+          import stat
 
           root = Path.cwd().resolve()
-          archive = root / "translateocr-github-patch.zip"
-          helper = root / ".github/workflows/apply-translateocr-patch.yml"
+          archive = root / "translateocr-github-patch-keep-default-api.zip"
 
           if not archive.is_file():
               raise SystemExit("Patch ZIP not found")
@@ -44,6 +47,10 @@ jobs:
                   if rel.is_absolute() or ".." in rel.parts:
                       raise SystemExit("Unsafe ZIP path")
 
+                  mode = info.external_attr >> 16
+                  if stat.S_ISLNK(mode):
+                      raise SystemExit("Symlinks are not allowed")
+
                   target = (root / Path(*rel.parts)).resolve()
 
                   if root not in target.parents:
@@ -53,17 +60,14 @@ jobs:
                       parents=True,
                       exist_ok=True
                   )
-
                   target.write_bytes(zf.read(info.filename))
 
           archive.unlink()
-          helper.unlink(missing_ok=True)
-
-          print("Patch applied")
-
+          print("Source patch applied.")
+          print("Original API defaults retained.")
           PY
 
-      - name: Commit changes
+      - name: Commit updated source
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -76,3 +80,35 @@ jobs:
 
           git commit -m "Apply TranslateOCR improvements"
           git push origin HEAD:master
+
+  build-apk:
+    needs: apply-patch
+    if: always() && (needs.apply-patch.result == 'success' || needs.apply-patch.result == 'skipped')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out latest master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Build installable APK
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: translateocr-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
